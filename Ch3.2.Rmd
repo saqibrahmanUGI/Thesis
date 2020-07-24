@@ -1,0 +1,562 @@
+---
+title: "Chapter 3.2 - Prediction of Pulmonary Complications"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(qs)
+library(plyr)             ####Data cleaning
+library(dplyr)            ####Data cleaning
+library(caret)            ####Model Training
+library(doParallel)       ####Parallel Computing
+library(pROC)             ####ROC Curves
+library(ResourceSelection)####Hosmer-Lemeshow Test
+library(DescTools)        ####Brier Score
+library(gbm)              ####Calibration Chart
+library(Metrics) 
+library(knitr)
+library(ggpubr)
+library(DALEX)            ####Comparing models
+library(ingredients)      ####Comparing models
+library(plotly)           ####Advanced plotting
+data<-qread('compq.q')
+complicationsdata<-select(data,-1,-2,-4,-7,-12,-15,-16,-17,-18,-19,-20,-21,-38:-50,-51,-54:-57,-58)
+colnames(complicationsdata)
+pulmonarycomp<-select(complicationsdata,-c(11:12,14:27))
+pulmonarycomp<-select(pulmonarycomp,-10)
+levels(pulmonarycomp$Pre.Operative.Treatment)<-c('Chemo','CRT','None',NA,NA)
+pulmonarycomp<-subset(pulmonarycomp,pulmonarycomp$cN.Stage!='N/A')
+pulmonarycomp<-subset(pulmonarycomp,pulmonarycomp$cT.Stage!='N/A')
+pulmonarycomp<-subset(pulmonarycomp,!is.na(pulmonarycomp$Anypulmonary))
+pulmonarycomp<-droplevels(pulmonarycomp)
+```
+
+Libraries used for this analysis
+```{r setup2,eval=F }
+
+
+library(plyr)             ####Data cleaning
+library(dplyr)            ####Data cleaning
+library(caret)            ####Model Training
+library(doParallel)       ####Parallel Computing
+library(pROC)             ####ROC Curves
+library(DescTools)        ####Brier Score
+library(ModelMetrics)     ####LogLoss
+library(ggpubr)           ####Arranging plots
+library(DALEX)            ####Comparing models
+library(ingredients)      ####Comparing models
+library(plotly)           ####Advanced plotting
+library(knitr)            ####Tables in Markdown
+
+```
+# Dataset Preparation  <br>
+Firstly a dataset is prepared. In this example I have selected a set of variables to predict an outcome (pulmonary complications). I select only the variables I am going to include in the model for reasons of simplicity. I then assess the recorded structure of variables to ensure that they have been coded appropriately. I focus particularly on factors and ordered/ordinal factors (e.g ASA, pT) which must be handled differently.  <br><br>
+```{r str}
+colnames(pulmonarycomp)
+str(pulmonarycomp)
+summary(pulmonarycomp$Anypulmonary)
+
+
+```
+<br><br>
+Here PS, ASA, cT.Stage and cN.Stage should be recorded as ordinal factors so they are changed. The levels of factors are also assessed, and the outcome factor, 'Anypulmonary' should be coded as a Yes/No variable, so that is also changed.  
+<br><br>
+```{r str1}
+pulmonarycomp$cT.Stage<-as.ordered(pulmonarycomp$cT.Stage)
+pulmonarycomp$cN.Stage<-as.ordered(pulmonarycomp$cN.Stage)
+pulmonarycomp$ASA<-as.ordered(pulmonarycomp$ASA)
+pulmonarycomp$PS<-as.ordered(pulmonarycomp$PS)
+levels(pulmonarycomp$Anypulmonary)<-c('No','Yes')
+str(pulmonarycomp)
+
+```
+<br><br>
+Next I prepare for modelling. A formula is specified first, with the outcome variable listed first. The "." includes all other variables in the dataframe to predict the outcome. 
+
+I then construct a training control script, which controls some options within the model training process. Below resampling is conducted using 10 fold crossvalidation with 5 repeats. 'classProbs' allows the model to calculate probabilities of outcomes (as opposed to being a yes/no classifier). 'summaryFunction' allows the C-index to be calculated. 
+
+The grid for hyperparameter tuning is constructed in 'ELGrid'. In this example an elastic net is trained, so 'alpha' is the L2 or LASSO penalty and lambda is the L1 or Ridge penalty. Alpha is set between 0 and 1 at 0.1 intervals and at the same time lambda is set to between 0 and 0.1 at 0.005 intervals. A similar approach is taken for a random forest and xgboost grid.  
+<br><br>
+
+```{r prep}
+fm <- as.formula( paste( 'Anypulmonary', ".", sep=" ~ ")) 
+
+cctrl <- trainControl(method="repeatedcv", number=10,repeats=5,returnResamp = "all", classProbs = TRUE,
+                      summaryFunction = multiClassSummary, savePredictions = TRUE,verboseIter = TRUE,allowParallel = TRUE)
+
+ELGrid = expand.grid(alpha = seq(0,1,by=0.1),lambda = seq(0,0.1,by = 0.005))
+RFGrid = expand.grid(
+  .mtry=2:10,
+  .splitrule=c("gini","extratrees"),
+  .min.node.size=c(1,3,5)
+)
+XGBGrid <- expand.grid(
+  nrounds = seq(from = 0, to = 5000, by = 500),
+  eta = c(0.05, 0.1, 0.3),
+  max_depth = c(2, 4, 6),
+  gamma = c(0.1,0.5,0.7,1.0),
+  colsample_bytree = c(0.4,0.6,0.8),
+  min_child_weight = c(1,2,3),
+  subsample = c(0.5,0.75)
+)
+
+
+```
+# Model Training
+The models are then trained using the above settings. To increase the speed of computation, which otherwise can be quite lengthy, I make use of parallel computing. I use the number of physical cores -one to conduct my analysis, leaving one core free for other computations.
+
+In this example, first an elastic net model is trained - as specified by method='glmnet'. Further training settings include optimisation metric, which I have chosen as 'ROC' (i.e. the C-index), which means that the grid search for hyperparameters selects the values to optimise this metric. After this a Random Forest and XG Boost model are trained. A Logistic Regression model is also trained for comparison purposes. 
+
+Missing values are handled by single imputation using a K-nearest neighbours method ('knnImpute'). This has the benefit of being conducted within each resample (i.e. data imputation in the training and test sets is conducted separately within each resample), which should reduce bias.
+
+After completing the analysis, the parallel computing session is closed.  
+<br><br>
+```{r model, eval=F, echo=T}
+cl <- makeForkCluster(detectCores(logical=FALSE)-1)
+registerDoParallel(cl)
+
+ELModel <-train(fm, data=pulmonarycomp, method="glmnet", trControl=cctrl,tuneGrid =ELGrid,
+                metric="AUC", na.action=na.pass, preProcess='knnImpute')
+
+RFModel<-train(fm, data=pulmonarycomp, method="ranger", num.trees=1000, na.action=na.pass,
+               preProcess='knnImpute',trControl= cctrl, tuneGrid=RFGrid,
+               metric="AUC",importance='permutation')
+
+XGBModel <-train(fm,data=pulmonarycomp,method="xgbTree",trControl=cctrl,tuneGrid=XGBGrid,
+                 na.action=na.pass, preProcess='knnImpute',metric="AUC")
+
+LRMModel <-train(fm, data=pulmonarycomp, method="glm", trControl=cctrl, metric="ROC",
+                 na.action=na.pass, preProcess='knnImpute')
+
+stopCluster(cl)
+registerDoSEQ()
+
+```
+
+```{r model2, echo=F}
+ELModel<-qread('ELModelM2.q')
+RFModel<-qread('RFmodelM2.q')
+XGBModel<-qread('XGBModelM2.q')
+LRMModel <-qread('LRMModelM.q')
+```
+# Validation  
+Next, model performance is assessed for each model in turn. The code below generates apparent performance (performance on the training set), classical cross validation performance (metrics and plots calculated in each fold and the averaged, 'Method 1' in thesis text) and cross validation performance using averaged predictions ('Method 2' in thesis text). For each, the C-index, Brier score and logloss is calculated, the Reciever Operator curve plotted and the calibration curve plotted, and saved into the object 'validation summary'.  
+<br><br>
+```{r perfgen, echo=T,eval=F}
+modellist<-list(ELModel,RFModel,XGBModel,LRMModel)
+
+system.time({
+###Apparent
+    appROC<-1
+    appCAB<-1
+    appCID<-1
+    appLL<-1
+    appBR<-1
+    {
+      for (m in 1:length(modellist)){
+      ###Calibration
+      {
+        model<-modellist[[m]]
+        LRMbp<-cbind(predict(model,na.omit(model$trainingData),type='prob')[,'Yes'],
+                     na.omit(model$trainingData)$.outcome)
+        LRMbp<-as.data.frame(LRMbp)
+        colnames(LRMbp)<-c('Yes','obs')
+        LRMbp$obs<-as.numeric(LRMbp$obs)-1
+        appLL[m]<-round(logLoss(LRMbp[,2],LRMbp[,1]),digits=3)
+        appBR[m]<-round(BrierScore(LRMbp[,2],LRMbp[,1]),digits=3)
+        appCAB[m]<-list(ggplot(data = LRMbp) + xlab("Specificity") + ylab('Sensitivity')+
+          geom_smooth(data = LRMbp, aes(Yes, obs),
+                      color = "#F8766D",se=TRUE,level=0.95,span=2/3)+
+            xlim(c(0,1))+ylim(c(0,1))+
+          geom_abline(intercept = 0, slope = 1,linetype=2))
+      }
+      ###Discrimination
+      {
+        model<-modellist[[m]]
+        LRMbp<-cbind(predict(model,na.omit(model$trainingData),type='prob')[,'Yes'],
+                     na.omit(model$trainingData)$.outcome)
+        LRMbp<-as.data.frame(LRMbp)
+        appCID[m]<-paste(round(cvAUC::AUC(LRMbp[,1],LRMbp[,2]),3),'(',
+                         round(ci.auc(LRMbp[,2],LRMbp[,1])[1],digits=3),
+                         '-',round(ci.auc(LRMbp[,2],LRMbp[,1])[3],digits=3),')')
+        colnames(LRMbp)<-c('Yes','obs')
+        rocobj<-roc(LRMbp$obs,LRMbp$Yes)
+        rocdata2<-as.data.frame(cbind(rocobj$sensitivities,rocobj$specificities))
+        ciobj<-ci.se(rocobj,specificities=seq(0,1,l=25))
+        dat.ci <- data.frame(x = as.numeric(rownames(ciobj)),
+                             lower = ciobj[, 1],
+                             upper = ciobj[, 3])
+        appROC[m]<-list(ggplot(data = rocdata2) +
+                          xlab("Predicted Probability") +
+                          ylab('Observed Average')+
+                              geom_line(data = rocdata2, aes(x=V2,y=V1),
+                                        color = "#F8766D")+xlim(c(1,0))+ylim(c(0,1))+
+                              geom_abline(intercept = 1, slope = 1,linetype=2)+
+                              geom_ribbon(data=dat.ci,aes(x=x,ymin=lower,ymax=upper), 
+                                          fill="grey", alpha=0.25))
+        
+        
+      }
+        names(appROC)[m]<-modellist[[m]]$method
+        names(appCAB)[m]<-modellist[[m]]$method
+    }
+    }
+  
+###Cross Validation
+    ###Calibration
+    avepredCAB<-1
+    aveplotCAB<-1
+    avepredLL<-1
+    avefoldLL<-1
+    avefoldBR<-1
+    avepredBR<-1
+    for (m in 1:length(modellist)){
+      model<-modellist[[m]]
+      if (length(model$bestTune)>1){
+      v<-names(model$bestTune)
+      xa<-model$pred
+      for (z in 1:length(model$bestTune)){
+        xa<-subset(xa,xa[,v[z]]==model$bestTune[z][[1]])
+      }
+      }else
+      xa<-model$pred
+ 
+      #Method 1
+      {
+        cab<-1
+        cabdata<-1
+        brs<-1
+        LLs<-1
+        for (z in 1:length(levels(as.factor(xa$Resample)))){
+          x1<-subset(xa,xa$Resample==levels(as.factor(xa$Resample))[z])
+          brs[z]<-BrierScore(as.numeric(x1$obs)-1,x1$Yes)
+          LLs[z]<-logLoss(as.numeric(x1$obs)-1,x1$Yes)
+          colnames(x1)
+          LRMbp<-select(x1,obs,Yes)
+          LRMbp$obs<-as.numeric(LRMbp$obs)-1
+          xx<-ggplot_build(ggplot(data = LRMbp) + xlab("Predicted Probability") + 
+                             ylab('Observed Average')+
+                             geom_smooth(data = LRMbp, aes(Yes, obs),
+                                         color = "#F8766D",se=TRUE,level=0.95,span=2/3)+
+                             xlim(c(0,1))+
+                             ylim(c(0,1))+
+                             geom_abline(intercept = 0, slope = 1,linetype=2))
+          
+          for (i in 1:(length(xx$data[[1]]$y)-1)){
+            xx$data[[1]]$y[i+1]<-ifelse(xx$data[[1]]$y[i]>0.9&is.na(xx$data[[1]]$y[i+1]),
+                                        1.0,
+                                  ifelse(xx$data[[1]]$y[i]<0.1&is.na(xx$data[[1]]$y[i+1]),
+                                         0,
+                                         xx$data[[1]]$y[i+1]))
+          }
+          cabdata[z]<-list(select(xx$data[[1]],x,y))
+        }
+        avefoldLL[m]<-paste(round(mean(LLs),digits=3),
+                            '(',round((mean(LLs)-1.96*std.error(LLs)),digits=3),
+                            '-',round((mean(LLs)+1.96*std.error(LLs)),digits=3),')')
+        avefoldBR[m]<-paste(round(mean(brs),digits=3),
+                            '(',round((mean(brs)-1.96*std.error(brs)),digits=3),
+                            '-',round((mean(brs)+1.96*std.error(brs)),digits=3),')')
+        xC<-as.data.frame(cabdata[[1]]$x)
+        yC<-as.data.frame(cabdata[[1]]$y)
+        for (i in 1:length(cabdata)){
+          xC[,i]<-cabdata[[i]]$x
+          yC[,i]<-cabdata[[i]]$y
+        }
+        yC[is.na(yC)]<-0
+        
+        cal_plot_data2<-cabdata[[1]]
+        cal_plot_data2$x<-rowMeans(xC)
+        cal_plot_data2$y<-rowMeans(yC)
+        cal_plot_data2$ymin<-rowMeans(yC)-1.96*std.error(t(yC))
+        cal_plot_data2$ymax<-rowMeans(yC)+1.96*std.error(t(yC))
+        calplot1<-ggplot(data = cal_plot_data2) +
+          xlab("Predicted Probability") +
+          ylab('Observed Average')+
+          geom_smooth(data = cal_plot_data2, aes(x, y),
+                      color = "#F8766D",se=FALSE,level=0.95,span=2/3)+
+          xlim(c(0,1))+ylim(c(0,1))+
+          geom_abline(intercept = 0, slope = 1,linetype=2)+
+          geom_ribbon(data=cal_plot_data2,aes(x=x,ymin=ymin,ymax=ymax), 
+                      fill="grey", alpha=0.25)
+        calplot1
+      }
+      #Method 2
+      {
+          model<-modellist[[m]]
+          if (length(model$bestTune)>1){
+            v<-names(model$bestTune)
+            xa<-model$pred
+            for (z in 1:length(model$bestTune)){
+              xa<-subset(xa,xa[,v[z]]==model$bestTune[z][[1]])
+            }
+          }else
+            xa<-model$pred
+        LRMbp<-cbind2((as.numeric((model$trainingData)$.outcome=='Yes')),
+                      aggregate(Yes~rowIndex,xa,mean)[,'Yes'])
+        LRMbp<-as.data.frame(LRMbp)
+        colnames(LRMbp)<-c('obs','Yes')
+        avepredLL[m]<-round(logLoss(LRMbp[,1],LRMbp[,2]),digits=3)
+        avepredBR[m]<-round(BrierScore(as.numeric(LRMbp[,1]),LRMbp[,2]),digits=3)
+        calplot2<-ggplot(data = LRMbp) +
+          xlab("Predicted Probability") +
+          ylab('Observed Average')+
+          geom_smooth(data = LRMbp, aes(Yes, obs),
+                      color = "#F8766D",se=TRUE,level=0.95,span=2/3)+
+          xlim(c(0,1))+
+          ylim(c(0,1))+
+          geom_abline(intercept = 0, slope = 1,linetype=2)
+      }
+      avepredCAB[m]<-list(calplot2)
+      aveplotCAB[m]<-list(calplot1)
+      names(avepredCAB)[m]<-modellist[[m]]$method
+      names(aveplotCAB)[m]<-modellist[[m]]$method
+    }
+
+    ###Discrimination
+    avepredROC<-1
+    aveplotROC<-1
+    avefoldCID<-1
+    avepredCID<-1
+    {
+
+      for (m in 1:length(modellist)){
+        ###Method 1
+        {
+        model<-modellist[[m]]
+        if (length(model$bestTune)>1){
+          v<-names(model$bestTune)
+          xa<-model$pred
+          for (z in 1:length(model$bestTune)){
+            xa<-subset(xa,xa[,v[z]]==model$bestTune[z][[1]])
+          }
+        }else
+          xa<-model$pred
+        x1<-subset(xa,xa$Resample==levels(as.factor(xa$Resample))[1])
+        rocobj<-roc(x1$obs,x1$Yes)
+      roc<-1
+      lgt<-1
+      cids<-1
+
+      for (i in 1:length(levels(as.factor(xa$Resample)))){
+        x1<-subset(xa,xa$Resample==levels(as.factor(xa$Resample))[i])
+        cids[i]<-auc(as.numeric(x1$obs)-1,x1$Yes)
+        lgt[i]<-nrow(x1)
+      }
+      avefoldCID[m]<-paste(round(mean(cids),digits=3),
+                           '(',round(mean(cids)-1.96*std.error(cids),digits=3),
+                           '-',round(mean(cids)+1.96*std.error(cids),digits=3),')')
+      
+      i<-1
+      for (i in 1:length(levels(as.factor(xa$Resample)))){
+        x1<-subset(xa,xa$Resample==levels(as.factor(xa$Resample))[i])
+        x1<-sample_n(x1,min(lgt))
+        rocobj<-roc(x1$obs,x1$Yes)
+        roc[i] <- list(ggplot_build(ggroc(rocobj,alpha=0.5,colour='red',
+                                          linetype=6,size=1))$data)
+      }
+      
+      lgt2<-1
+      for (i in 1:length(roc)){
+        lgt2[i]<-length(roc[[i]][[1]]$x)
+      }
+      
+      
+      
+      xR<-as.data.frame(roc[[1]][[1]]$x[(1:min(lgt2))])
+      yR<-as.data.frame(roc[[1]][[1]]$y[(1:min(lgt2))])
+      for (i in 1:length(roc)){
+        seqs<-ceiling(seq(from=1,to=length(roc[[i]][[1]]$x),length.out=min(lgt2)))
+        xR[,i]<-roc[[i]][[1]]$x[seqs]
+        yR[,i]<-roc[[i]][[1]]$y[seqs]
+      }
+
+      
+      rocdat<-as.data.frame(cbind(-rowMeans(xR),
+                                  rowMeans(yR),
+                                  rowMeans(yR)+1.96*std.error(t(yR)),
+                                  rowMeans(yR)-1.96*std.error(t(yR))))
+      
+      colnames(rocdat)<-c('x','y','ymax','ymin')
+      
+      aveplotROC[m]<-list(ggplot(data = rocdat) + 
+                            xlab("Specificity") +
+                            ylab('Sensitivity')+
+                            geom_line(data = rocdat, aes(y=y, x=x),
+                                      color = "#F8766D")+xlim(c(1,0))+ylim(c(0,1))+
+                            geom_abline(intercept = 1, slope = 1,linetype=2)+
+                            geom_ribbon(data=rocdat,aes(x=x,ymin=ymin,ymax=ymax), 
+                                        fill="grey", alpha=0.25))
+}
+      ###Method 2
+        {
+        model<-modellist[[m]]
+          if (length(model$bestTune)>1){
+            v<-names(model$bestTune)
+            xa<-model$pred
+            for (z in 1:length(model$bestTune)){
+              xa<-subset(xa,xa[,v[z]]==model$bestTune[z][[1]])
+            }
+          }else
+            xa<-model$pred
+        LRMbp<-cbind2((as.numeric((model$trainingData)$.outcome=='Yes')),
+                      aggregate(Yes~rowIndex,xa,mean)[,'Yes'])
+        LRMbp<-as.data.frame(LRMbp)
+        colnames(LRMbp)<-c('obs','Yes')
+        avepredCID[m]<-paste(round(cvAUC::AUC(LRMbp[,2],LRMbp[,1]),3),
+                             '(',round(ci.auc(LRMbp[,1],LRMbp[,2])[1],digits=3),
+                             '-',round(ci.auc(LRMbp[,1],LRMbp[,2])[3],digits=3),')')
+        ci.auc(LRMbp[,1],LRMbp[,2])[1:2]
+        names(avepredCID)[m]<-modellist[[m]]$method
+        LRMbp$Yes<-1-LRMbp$Yes
+        
+        LRMbp$obs<-as.factor(LRMbp$obs)
+        rocobj<-roc(LRMbp$obs,LRMbp$Yes)
+        rocdata2<-as.data.frame(cbind(rocobj$sensitivities,rocobj$specificities))
+        ciobj<-ci.se(rocobj,specificities=seq(0,1,l=25))
+        dat.ci <- data.frame(x = as.numeric(rownames(ciobj)),
+                             lower = ciobj[, 1],
+                             upper = ciobj[, 3])
+        avepredROC[m]<-list(ggplot(data = rocdata2) +
+                              xlab("Specificity") +
+                              ylab('Sensitivity')+
+                              geom_line(data = rocdata2, aes(x=V2,y=V1),
+                                        color = "#F8766D")+xlim(c(1,0))+ylim(c(0,1))+
+                              geom_abline(intercept = 1, slope = 1,linetype=2)+
+                              geom_ribbon(data=dat.ci,aes(x=x,ymin=lower,ymax=upper),
+                                          fill="grey", alpha=0.25))
+        
+        
+      }
+        names(avepredROC)[m]<-modellist[[m]]$method
+        names(aveplotROC)[m]<-modellist[[m]]$method
+      }
+    }
+    
+metr<-as.data.frame(1:length(modellist))
+metr$ApparentCID<-appCID
+metr$ApparentLL<-appLL
+metr$ApparentBR<-appBR
+metr$FoldAveCID<-avefoldCID
+metr$PredAveCID<-avepredCID
+metr$FoldAveLL<-avefoldLL
+metr$PredAveLL<-avepredLL
+metr$FoldAveBR<-avefoldBR
+metr$PredAveBR<-avepredBR
+metr<-select(metr,-1)
+for (m in 1:length(modellist)){
+  rownames(metr)[m]<- modellist[[m]]$method
+}
+
+
+validationsummary<-list(metr,appROC,avepredROC,aveplotROC,appCAB,avepredCAB,aveplotCAB)
+names(validationsummary)<-c('Metrics','Apparent ROC','Average-Prediction ROC',
+                            'Average-Plot ROC','Apparent Calibration',
+                            'Average-Prediction Calibration','Average-Plot Calibration')
+
+rm(cids,LLs,appCAB,appROC,aveplotCAB,aveplotROC,avepredCAB,avepredROC,cabdata,
+   cal_plot_data2,calplot1,calplot2,ciobj,dat.ci,LRMbp,metr,model,roc,rocdat,
+   rocdata2,rocobj,x1,xa,xC,xR,xx,yC,yR,appBR,appCID,appLL,avefoldBR,avefoldCID,
+   avefoldLL,avepredBR,avepredCID,avepredLL,brs,cab,i,lgt,lgt2,m,seqs,z)
+
+})
+
+```
+
+```{r valload, echo=F}
+validationsummary<-qread('valsummCh3.q')
+rownames(validationsummary$Metrics)<-c('Logistic Regression','Elastic Net','Random Forest','XGBoost')
+modellist<-list(ELModel,RFModel,XGBModel,LRMModel)
+```
+<br><br>
+Performance metrics (C-index, LogLoss, Brier Score) can then be called and are summarised below.  
+<br><br>
+```{r calib, }
+
+kable(validationsummary$Metrics[,1:3],caption='Apparent Performance')
+kable(validationsummary$Metrics[,c(4,6,8)],caption='Method 1 CV Performance')
+kable(validationsummary$Metrics[,c(5,7,9)],caption='Method 2 CV Performance')
+
+```
+<br><br>
+The ROC Curve is then visualised (CV method 1).  
+<br><br>
+```{r calib2,fig.cap='Figure 1: Cross Validation Receiver Operator Characteristic Curves (A) Logistic Regression Model, (B) Elastic Net, (C) Random Forest, (D) XGBoost. The 45 degree dashed line represents random chance. The shaded area represents the 95% confidence interval'}
+ggarrange(validationsummary[[4]][[1]],
+          validationsummary[[4]][[2]],
+          validationsummary[[4]][[3]],
+          validationsummary[[4]][[4]],ncol=2,nrow=2,labels=c('A','B','C','D'))
+
+```
+<br><br>
+Calibration plots are informative in intepreting predictions (CV method 2).  
+<br><br>
+```{r calib3,fig.cap='Figure 2: Cross Validation Calibration Charts (A) Logistic Regression Model, (B) Elastic Net, (C) Random Forest, (D) XGBoost. The 45 degree dashed line represents perfect agreement between predicted and observed probabilities. The shaded area represents the 95% confidence interval'}
+ggarrange(validationsummary[[7]][[1]],
+          validationsummary[[7]][[2]],
+          validationsummary[[7]][[3]],
+          validationsummary[[7]][[4]],ncol=2,nrow=2,labels=c('A','B','C','D'))
+
+```
+# Variable Importance  
+Permutation variable importance is calculated and scaled to a percentage of the most important variable in each model.  
+<br><br>
+```{r varimp1,}
+VariableImportance<-varImp(modellist[[1]])$importance
+VariableImportance<-cbind(VariableImportance,varImp(modellist[[2]])$importance)
+VariableImportance<-cbind(VariableImportance,varImp(modellist[[3]])$importance)
+VariableImportance<-cbind(VariableImportance,varImp(modellist[[4]])$importance)
+colnames(VariableImportance)<-c('Logistic Regression','Elastic Net','Random Forest','XGBoost')
+VariableImportance<-round(VariableImportance,digits=2)
+knitr::kable(VariableImportance, Caption='Permutation based variable importance')
+
+```
+<br><br>
+The partial dependence function is the calculated using the DALEX package. "Explainer" wrappers are created with reference to the training data which can the be applied to different variables.  
+<br><br>
+```{r varimp2,fig.cap='Marginal predicted probability for age, averaged for all other variables'}
+majc<-na.omit(pulmonarycomp)
+expLRM<-explain(modellist[[1]],data=majc,y=as.numeric(majc$Anypulmonary)-1,label='LRM')
+expELR<-explain(modellist[[2]],data=majc,y=as.numeric(majc$Anypulmonary)-1,label='ELR')
+expRF<-explain(modellist[[3]],data=majc,y=as.numeric(majc$Anypulmonary)-1,label='RF')
+expXGB<-explain(modellist[[4]],data=majc,y=as.numeric(majc$Anypulmonary)-1,label='XGBoost')
+
+x<-(ingredients::partial_dependency(expXGB,'Age'))
+x1<-(ingredients::partial_dependency(expRF,'Age'))
+x2<-(ingredients::partial_dependency(expELR,'Age'))
+x3<-(ingredients::partial_dependency(expLRM,'Age'))
+fintab<-rbind(x,x1,x2,x3)
+ft<-rbind(x,x1,x2,x3)
+colnames(fintab)<-c('Variable.Name','Model','x','y','ids')
+agepdp<-ggplotly(ggplot(fintab,aes(x,y))+
+  geom_line(data=fintab,mapping=aes(colour=Model))+theme_bw()+
+  ylim(0,0.6)+
+  ylab('Predicted Probability')+
+  xlab('Age (years)')+ggtitle('Age at diagnosis'))
+agepdp
+```
+<br><br>  
+  Categorical variables can be handled similarly  
+<br><br>
+```{r varimp3,fig.cap='Marginal predicted probability for WHO Performance Status, averaged for all other variables'}
+x<-(ingredients::partial_dependency(expXGB,'PS'))
+x1<-(ingredients::partial_dependency(expRF,'PS'))
+x2<-(ingredients::partial_dependency(expELR,'PS'))
+x3<-(ingredients::partial_dependency(expLRM,'PS'))
+fintab<-rbind(x,x1,x2,x3)
+ft<-rbind(ft,fintab)
+colnames(fintab)<-c('Variable.Name','Model','x','y','ids')
+colnames(fintab)[3]<-'Performance_Status'
+pspdp<-ggplotly(ggplot(fintab,aes(x=Performance_Status,y=y,fill=Performance_Status))+
+  geom_bar(position='dodge',stat='identity')+theme_bw()+
+  ylab('Marginal Predicted Probability')+
+  xlab('')+
+  facet_wrap(~Model)+ggtitle('Performance Status'))
+pspdp
+```  
+

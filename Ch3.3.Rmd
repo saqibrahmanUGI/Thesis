@@ -1,0 +1,332 @@
+---
+title: "Chapter 3.3 - Outcomes and survival following neoadjuvant chemotherapy versus neoadjuvant chemoradiotherapy for cancer of the esophagus: Inverse propensity score weighted analysis"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(naniar)         #####missing data analysis
+library(mice)           #####imputation of missing data
+library(VGAM)           ####Logistic regression model for PS generation
+library(plyr)           ####data cleaning
+library(dplyr)          ####data cleaning
+library(tableone)       ####comparison tables
+library(survey)         ####weighting of tables
+library(jskm)           ####weighted Kaplan-Meier charts
+library(gbm)            ####arrangement of charts
+library(plotly)
+library(tldr)
+library(qs)####advanced plotting
+kableone <- function(x, ...) {
+  capture.output(x <- print(x))
+  knitr::kable(x, ...)
+}
+
+dataNEW<-readRDS('crtdata.rds')
+data<-dataNEW
+pcr<-ifelse(dataNEW$Response.to.chemo==1 & dataNEW$pT.Stage==0 & dataNEW$pM.Stage==0 & dataNEW$pN.Stage==0,1,0)
+dataNEW$pCRM<-as.factor(pcr)
+plyr::count(dataNEW$pCRM)
+allcol<-colnames(dataNEW)
+covariates<-allcol[c(2,3,4,5,6,8,9)]
+```
+
+A form of this analysis has been published in the European Journal of Surgical Oncology (https://doi.org/10.1016/j.ejso.2020.06.038; 22/06/2020)
+The following libraries are required for this analysis
+```{r libraries,eval=F}
+library(naniar)         #####missing data analysis
+library(mice)           #####imputation of missing data
+library(VGAM)           ####Logistic regression model for PS generation
+library(plyr)           ####data cleaning
+library(dplyr)          ####data cleaning
+library(tableone)       ####comparison tables
+library(survey)         ####weighting of tables
+library(jskm)           ####weighted Kaplan-Meier charts
+library(gbm)            ####arrangement of charts
+library(plotly)         ####advanced plotting
+        
+kableone <- function(x, ...) {
+  capture.output(x <- print(x))
+  knitr::kable(x, ...)
+} ####makes nice tables with tableone
+```
+# Missing  Data
+<br><br>
+Having loaded in a dataframe, as we know this data contains missing values, we first visualise these. There are different aspects that need to be considered here. First, the absolute/proportion of missing data in each variable, which is shown in the first plot. Any variable that contains more than about 30% of missing data should probably be discarded as imputation becomes unreliable.
+<br><br>
+```{r missing,fig.cap='Figure 1: Missing Data plot, percentage of data points missing for each variable.'}
+gg_miss_var(data,show_pct = TRUE)
+```
+<br><br>
+Here we can see an overall very small amount of missing data, with only Overall and Disease Free survival >1%. The second aspect for consideration is the pattern of missingness in the data. In chapter 2 there is a discussion about types of missing data. If data is missing completely at random (MCAR), then it is reasonable to simply exclude the cases with missing data (although this will reduce the power of the study). In reality it is rare for this to be the case with clinical datasets, as can be seen below. Formal quanitificaiton of this could be performed with Little's MCAR test (a chi-square variant). Unsurprisingly, patients who have OS missing, also have DFS missing, so this data is obviously not MCAR. The data is therefore either missing at random (MAR) or missing not at random (MNAR). We have no reason to think that missing data points are related to the outcomes in question, so it is reasonable to treat this data as MAR and proceed with imputation. Imputation is performed by the MICE function, here with 5 imputation sets and 10 iterations. For this study we then extract the individual datasets using the complete function .
+<br><br>
+```{r micex,eval=T,echo=F}
+data2<-select(dataNEW,-1,-21,-23)
+###mice<-mice(data2,m=5,maxit=10)
+###qsave(mice,'crtmice.q')
+mice<-qread('crtmice.q')
+complete1<-mice::complete(mice,1)
+complete2<-mice::complete(mice,2)
+complete3<-mice::complete(mice,3)
+complete4<-mice::complete(mice,4)
+complete5<-mice::complete(mice,5)
+covariates<-colnames(dataNEW)[c(2,3,4,5,6,8,9)]
+data<-dataNEW
+
+```
+
+
+```{r mice,eval=FALSE}
+mice<-mice(data,m=5,maxit=10)
+complete1<-mice::complete(mice,1)
+complete2<-mice::complete(mice,2)
+complete3<-mice::complete(mice,3)
+complete4<-mice::complete(mice,4)
+complete5<-mice::complete(mice,5)
+covariates<-colnames(data)[c(2,3,4,5,6,8,9)]####Choose which covariates to include in the PS score
+```
+# Propensity Score Generation and weighting
+The propensity score is the probability of being assigned to a treatment dependent on a set of specified covariates. It is therefore equal to the probability output of a logistic regression model with the treatment choice (in this case preoperative treatment) as the dependent variable and a list of covariates as the independent variable. We first specify a list of variables to match on pragmatically. We then derive the logistic regression model and add the propensity score to the existing data frames. The below code was modified from that provided by Yoshida et al.(doi: 10.1097/EDE.0000000000000627), and was chosen as it can be easily extended to three or more groups if necessary. This is repeated for each of the 5 imputations sets.
+<br><br>
+
+```{r gps}
+###Pre.Operative.Treatment should be changed to the response variable required. Covariates applies the selected variables to generate the propenstiy score.
+AddGPS <- function(data,
+                   formula  = as.formula(paste('Pre.Operative.Treatment','~',paste(covariates,collapse='+'))),
+                   psPrefix = "PS_",
+                   family   = multinomial(parallel = FALSE)) {
+  ## Fit multinomial logistic regression
+  resVglm <- vglm(formula = formula,
+                  data    = data,
+                  family  = family)
+  ## Calculate PS
+  psData <- as.data.frame(predict(resVglm, type = "response"))
+  names(psData) <- paste0(psPrefix, names(psData))
+  ## Add to data
+  cbind(data, psData)
+}
+
+complete1a<-AddGPS(complete1)
+complete2a<-AddGPS(complete2)
+complete3a<-AddGPS(complete3)
+complete4a<-AddGPS(complete4)
+complete5a<-AddGPS(complete5)
+```
+<br><br>
+Having added the propensity score, we can then calculate the inverse probability of treatment weight (IPTW). This was again modified from Yoshida et al.
+<br><br>
+
+```{r mwad}
+###Add response variable levels in place of ('Chemo','CRT')
+AddIPTW <- function(data, txVar = "Tr", tx = c('Chemo','CRT'), psPrefix = "PS_") {
+  
+  ## Treatment indicator data frame (any number of groups allowed)
+  dfAssign <- as.data.frame(lapply(tx, function(tx_k) {
+    as.numeric(data[txVar] == tx_k)
+  }))
+  colnames(dfAssign) <- paste0(txVar, tx)
+  psVars <- paste0(psPrefix,tx)
+  data$PSassign <- rowSums(data[psVars] * dfAssign)
+  data$iptw <- exp(- log(data$PSassign))
+  data
+}
+
+
+complete1b<-AddIPTW(data=complete1a,txVar='Pre.Operative.Treatment')
+complete2b<-AddIPTW(data=complete2a,txVar='Pre.Operative.Treatment')
+complete3b<-AddIPTW(data=complete3a,txVar='Pre.Operative.Treatment')
+complete4b<-AddIPTW(data=complete4a,txVar='Pre.Operative.Treatment')
+complete5b<-AddIPTW(data=complete5a,txVar='Pre.Operative.Treatment')
+```
+<br><br>
+These values can then be combined by taking the arithmetic mean (this is the across method of analysis of multiply imputed propensity scores). The stabilised IPTW is calculated by normalising the IPTW to the number of cases of each treatment.
+<br><br>
+
+```{r miiptw}
+averagePS<-as.data.frame(complete1b$iptw)
+names(averagePS)<-'iptw'
+for (i in 1:nrow(averagePS)){
+  averagePS$iptw[i]<-mean(complete1b$iptw[i],complete2b$iptw[i],complete3b$iptw[i],complete4b$iptw[i],complete5b$iptw[i])
+}
+
+dataPS<-cbind(data,averagePS)
+
+stabilisedIPTW<-ifelse(dataPS$Pre.Operative.Treatment=='Chemo',
+                       dataPS$iptw*(plyr::count(dataPS$Pre.Operative.Treatment)[1,2]/
+                                      nrow(dataPS)),
+                       ifelse(dataPS$Pre.Operative.Treatment=='CRT',
+                        dataPS$iptw*(plyr::count(dataPS$Pre.Operative.Treatment)[2,2]/
+                                       nrow(dataPS)),NA))
+
+dataPS$sw<-stabilisedIPTW
+```
+
+The range of weights generated is next assessed. As can be seen the naive IPTW has wide range of weights, with a large mean weight which if applied to a dataset will result in incorrect estimates of effect and biased confidence intervals. The stabilised IPTW eliminates this bias.
+
+
+```{r weights}
+
+summary(dataPS$iptw)
+
+summary(dataPS$sw)
+
+```
+# Covariate Balance
+Covariate balance is then assessed using the standardised mean difference (SMD). This is most easily seen with a plot of all variables, but also as a global mean. A SMD of <0.1 is said to indicate a lack of imbalance between variables. Code for this plot was also modified from Yoshida et al. Comparison using standard methods (with or without weighting) is also possible, but is less favoured.
+<br><br>
+```{r SMD, fig.cap='Figure 2: Standardised Mean Difference of Confounding variables, before and after Inverse Probability of Treatment Weighting. SMD<0.1 indicates good balance.'}
+
+Unadjusted <- CreateTableOne( data = data,vars = covariates, strata = 'Pre.Operative.Treatment')
+iptwsvy <- svydesign(ids = ~ 1, data = dataPS, weights = ~ sw) #####weighted analysis
+iptw <- svyCreateTableOne(vars = covariates, strata = 'Pre.Operative.Treatment', data = iptwsvy)
+
+ExtractSmd(Unadjusted)
+ExtractSmd(iptw)
+
+{
+  dataPlot <- data.frame(variable   = rownames(ExtractSmd(Unadjusted)),
+                         Unadjusted = ExtractSmd(Unadjusted),
+                         Weighted   = ExtractSmd(iptw))
+  names(dataPlot)<-c("variable",'Unadjusted','Weighted')
+  library(reshape2)
+  dataPlotMelt <- melt(data          = dataPlot,
+                       id.vars       = "variable",
+                       variable.name = "method",
+                       value.name    = "SMD")
+  varsOrderedBySmd <- rownames(dataPlot)[order(dataPlot[,"Unadjusted"])]
+  dataPlotMelt$variable <- factor(dataPlotMelt$variable,
+                                  levels = varsOrderedBySmd)
+  dataPlotMelt$method <- factor(dataPlotMelt$method,
+                                levels = c("Weighted","Unadjusted"))
+  dataPlotMelt$method
+  library(ggplot2)
+  ggplotly(ggplot(data = dataPlotMelt, mapping = aes(x = variable, y = SMD, group = method, linetype = method)) +
+    geom_line() +
+    geom_point() +
+    geom_hline(yintercept = 0, size = 0.3) +
+    geom_hline(yintercept = 0.1, size = 0.1) +
+    coord_flip() +
+    theme_bw() + theme(legend.key = element_blank())+
+    ggtitle(''))
+  
+}
+
+```
+
+We can see here that there is an improvement of balance with this approach. Before balancing, 6/7 variables have a SMD of >0.1, and after balancing none do. In comparison below, there are no significant differences between variables after balancing.<br><br>
+
+```{r balance}
+kableone(CreateTableOne( data = data,vars = covariates, strata = 'Pre.Operative.Treatment'))
+kableone(svyCreateTableOne(vars = covariates, strata = 'Pre.Operative.Treatment', data = iptwsvy))
+
+```
+# Complications and Pathological Outcomes
+Next, the desired outcomes can be compared. This can be conducted in one of two ways. Firstly a straightforward comparison by statistical hypothesis testing (with/without weighting). This has the benefit of being easy to understand and familiar to clinicians. We first define a list of outcomes for comparison.
+<br><br>
+```{r outcomes1}
+
+complicationvariables<-colnames(dataPS)[c(11:19)]
+pathologicalvariables<-colnames(dataPS)[c(24:31)]
+
+unadjustedcomplications <- CreateTableOne(vars = complicationvariables, strata = 'Pre.Operative.Treatment', data = data)
+iptwcomplications <- svyCreateTableOne(vars = complicationvariables, strata = 'Pre.Operative.Treatment', data = iptwsvy)
+
+
+kableone(unadjustedcomplications <- CreateTableOne(vars = complicationvariables, strata = 'Pre.Operative.Treatment', data = data))
+kableone(iptwcomplications <- svyCreateTableOne(vars = complicationvariables, strata = 'Pre.Operative.Treatment', data = iptwsvy))
+```
+
+Note the number of patients in the adjusted sample is not quite the same (or whole numbers). In this sample, balancing made no real difference in complications between the two groups. We then repeat the process for pathological variables.
+<br><br>
+
+```{r outcomes2}
+unadjustedpathology <- CreateTableOne(vars = pathologicalvariables, strata = 'Pre.Operative.Treatment', data = data)
+iptwpathology <- svyCreateTableOne(vars = pathologicalvariables, strata = 'Pre.Operative.Treatment', data = iptwsvy)
+
+kableone(unadjustedpathology <- CreateTableOne(vars = pathologicalvariables, strata = 'Pre.Operative.Treatment', data = data))
+kableone(iptwpathology <- svyCreateTableOne(vars = pathologicalvariables, strata = 'Pre.Operative.Treatment', data = iptwsvy))
+
+```
+# Survival Analysis
+Again, similar values are seen, although there is no longer a difference in recurrence pattern or pN stage after adjustment for confounding. Next we can assess overall survival and disease free survival.
+<br><br>
+
+```{r outcomes3,fig.cap=c('Figure 3: Unweighted Overall Survival','Figure 4: Weighted Overall Survival','Figure 5: Unweighted Disease Free Survival','Figure 6: Weighted Disease Free Survival','Figure 7: Combined Plot')}
+
+dataOS<-subset(dataPS,dataPS$OS!='NA')
+unadjustedOS<-survfit(Surv(dataOS$OS, as.numeric(dataOS$Death)) ~ dataOS$Pre.Operative.Treatment, data=dataOS)
+iptwsvyOS <- svydesign(ids = ~ 1, data = dataOS, weights = ~ sw)
+iptwOS<-svykm(Surv(OS,Death)~Pre.Operative.Treatment,design=iptwsvyOS,data=dataOS)
+
+
+a<-jskm(unadjustedOS, timeby = 12, ystratalabs=c('NACT',"NACRT"),
+     ystrataname = "Neoadjuvant Treatment", table = TRUE, ci=FALSE, pval=FALSE,
+     xlabs="Months after Surgery", main ="",
+     dashed=FALSE,marks=FALSE,xlims=c(0,60),legendposition=c(0.85,1))
+b<-svyjskm(iptwOS, timeby = 12, ystratalabs=c('NACT',"NACRT"),
+        ystrataname = "Neoadjuvant Treatment", table = TRUE, ci=FALSE, pval=FALSE,
+        xlabs="Months after Surgery", main ="",
+        dashed=FALSE,marks=TRUE,xlims=c(0,60),legendposition=c(0.85,1))
+
+
+
+dataDFS<-subset(dataPS,dataPS$DFS!='NA')
+unadjustedDFS<-survfit(Surv(dataDFS$DFS, as.numeric(dataDFS$Recurrence)) ~ dataOS$Pre.Operative.Treatment, data=dataDFS)
+iptwsvyDFS <- svydesign(ids = ~ 1, data = dataDFS, weights = ~ sw)
+iptwDFS<-svykm(Surv(DFS,Recurrence)~Pre.Operative.Treatment,design=iptwsvyDFS,data=dataDFS)
+
+
+c<-jskm(unadjustedDFS, timeby = 12, ystratalabs=c('NACT',"NACRT"),
+     ystrataname = "Neoadjuvant Treatment", table = TRUE, ci=FALSE, pval=FALSE,
+     xlabs="Months after Surgery", main ="",
+     dashed=FALSE,marks=FALSE,xlims=c(0,60),legendposition=c(0.85,1))
+d<-svyjskm(iptwDFS, timeby = 12, ystratalabs=c('NACT',"NACRT"),
+        ystrataname = "Neoadjuvant Treatment", table = TRUE, ci=FALSE, pval=FALSE,
+        xlabs="Months after Surgery", main ="",
+        dashed=FALSE,marks=TRUE,xlims=c(0,60),legendposition=c(0.85,1))
+
+grid.arrange(a,b,c,d,ncol=2)
+
+```
+<br><br>
+Importantly, a statistically significant increase in overall survival in the unadjusted cohort is eliminated by adjusting for confounders. In this cohort, the increase in survival with NACRT is seen exclusively with patients who have squamous cell carcinoma (SCC), in line with the published literature. This highlights the difficulty in assessing mixed groups of oesophageal cancer patients, but also that the propensity score balancing can address this problem. 
+
+# Weighted logistic/cox regression
+
+Comparison between groups can also be made by deriving weighted logistic regression models (or cox proportional hazard models for survival outcomes) with the outcome (e.g. anastomotic leak) as the dependent variable and the group on which the propensity score balances (e.g. preoperative treatment) as the only independent/predictor variable. As balancing has eliminated differences in other variables already, there is no need to include them in the model formula. As an example of this below, it is calculated for Anastomotic Leak and for Overall Survival
+<br><br>
+
+```{r outcomes4}
+
+dataleak<-subset(dataPS,dataPS$Chyle.Leak!='NA')
+Svyiptw <- svydesign(ids = ~ 1, data = dataleak, weights = ~ sw)
+modelLeak <- svyglm(formula = as.formula(Chyle.Leak ~ Pre.Operative.Treatment), design = Svyiptw,family=quasibinomial())
+summary(modelLeak)
+OR<-round(exp(modelLeak$coefficients)[2],2)
+LCI<-round(exp((modelLeak$coefficients)[2]-(1.96*summary(modelLeak)$coefficients[2,2])),2)
+UCI<-round(exp((modelLeak$coefficients)[2]+(1.96*summary(modelLeak)$coefficients[2,2])),2)
+odds<-paste(OR,LCI,UCI)
+odds
+
+```
+<br><br>
+We can see here an increased odds ratio of chyle leak with NACRT (whether this is spurious or not) at 3.1 (1.1-8.7).
+<br><br>
+
+```{r outcomes5}
+
+dataOS<-subset(dataPS,dataPS$OS!='NA')
+
+SvyiptwOS <- svydesign(ids = ~ 1, data = dataOS, weights = ~ sw)
+svykmiptw<-svykm(Surv(OS,Death)~Pre.Operative.Treatment,design=SvyiptwOS,data=dataOS)
+svykmiptw
+
+modelcox1 <- svycoxph(formula = as.formula(Surv(OS,Death)~Pre.Operative.Treatment), design = SvyiptwOS)
+summary(modelcox1)
+
+```
+<br><br>
+In comparison there is no overall survival advantage to NACRT, with a hazard ratio of survival of 0.74 (0.45-1.21). This method will tend to give similar results to direct comparison, but has the advantage of quantifying the differences between groups. It is probably more appropriate to use in larger cohorts.
+<br><br>
