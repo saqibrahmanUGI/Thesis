@@ -5,3 +5,4 @@ HTML pages are provided as dynamic charts are present within these files. They c
 
 Chapter 3.2 Prediction of pulmonary complications: https://rpubs.com/sar03/642454 <br>
 Chapter 3.3 IPTW Analysis: https://rpubs.com/sar03/642530
+Chapter 4 Prediction of early recurrence https://rpubs.com/sar03/Ch4
