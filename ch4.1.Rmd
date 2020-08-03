@@ -1,0 +1,605 @@
+---
+title: "Partial Dependence Plots and their effect on the rate of early recurrence for Elastic Net (ELR), Random Forest (RF), XGBoost and Ensemble models"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+{library(readxl)
+library(dplyr)
+library(caret)
+  library(ggpubr)
+  library(plotly)
+  library(DiagrammeR)
+  library(qs)
+  library(plotrix)
+  library(tableone)
+library(pROC)
+  library(doParallel)
+library(givitiR)
+  library(CORElearn)
+library(ResourceSelection)
+library(AF)
+library(rms)
+library(plyr)
+library(haven)
+library(survival)
+library(paf)
+library(gridExtra)
+library(readxl)
+library(haven)
+library(mice)
+library(VIM)
+library(boot)
+library(tidyverse)
+library(rfUtilities)
+library(gbm)
+library(DescTools)
+library(glmnet)
+library(rpart)
+library(DescTools)
+library(paf)
+library(caretEnsemble)
+  library(DALEX)
+}
+intextVal<-qread('intextVal.q')
+validationlist<-qread('validationlist4.1.q')
+{
+  ELRFig<-ggarrange(validationlist$Calibration[[1]]+ggtitle('Uncalibrated'),
+            validationlist$Calibration[[5]]+ggtitle('Calibrated'),ncol=2)
+  ELRFig<-annotate_figure(ELRFig,
+                  top = text_grob("Elastic Net Regression", color = "black", face = "bold", size = 14))
+     RFFig<-ggarrange(validationlist$Calibration[[2]]+ggtitle('Uncalibrated'),
+                       validationlist$Calibration[[6]]+ggtitle('Calibrated'),ncol=2)
+     RFFig<-annotate_figure(RFFig,
+                             top = text_grob("Random Forest", color = "black", face = "bold", size = 14))
+     XGBFig<-ggarrange(validationlist$Calibration[[3]]+ggtitle('Uncalibrated'),
+                       validationlist$Calibration[[7]]+ggtitle('Calibrated'),ncol=2)
+     XGBFig<-annotate_figure(XGBFig,
+                             top = text_grob("XGBoost", color = "black", face = "bold", size = 14))
+     XGBFig    
+     
+     EnsFig<-ggarrange(validationlist$Calibration[[4]]+ggtitle('Uncalibrated'),
+                       validationlist$Calibration[[9]]+ggtitle('Calibrated'),ncol=2)
+     EnsFig<-annotate_figure(EnsFig,
+                             top = text_grob("Ensemble", color = "black", face = "bold", size = 14))
+     }
+dataC<-readRDS('dataC4.1.rds')
+{
+ELGrid = expand.grid(alpha = seq(0,1,by=0.1),lambda = seq(0,0.1,by = 0.005))
+RFGrid = expand.grid(
+  .mtry=2:10,
+  .splitrule=c("gini","extratrees"),
+  .min.node.size=c(1,3,5)
+)
+XGBGrid <- expand.grid(
+  nrounds = seq(from = 0, to = 1000, by = 200),
+  eta = c(0.05, 0.1, 0.3),
+  max_depth = c(2, 4, 6),
+  gamma = c(0.5,0.7,1.0),
+  colsample_bytree = c(0.4,0.8),
+  min_child_weight = c(1,2,3),
+  subsample = c(0.5,0.75))
+
+  cctrl1 <- trainControl(method="repeatedcv", number=10,returnResamp = "all", repeats=5, 
+                         classProbs = TRUE, summaryFunction = multiClassSummary, savePredictions = TRUE, verboseIter = TRUE,allowParallel = TRUE)
+  cctrl3 <- trainControl(method="boot", number=1000,returnResamp = "all", 
+                         classProbs = TRUE, summaryFunction = multiClassSummary, savePredictions = TRUE, verboseIter = TRUE)
+  cctrl3a <- trainControl(method="boot", number=1,returnResamp = "all", 
+                         classProbs = TRUE, summaryFunction = multiClassSummary, savePredictions = TRUE, verboseIter = TRUE)
+  nocctrl <- trainControl(method="none",classProbs = TRUE)
+  p="EarlyRec"
+  fm <- as.formula( paste( p, ".", sep=" ~ ")) 
+  rm(p)
+}
+Finalmodels<-qread('Finalmodels4.1.q')
+```
+
+
+# Model Training
+
+To train the models, first the hyperparameter grids are defined, before training parameters are set.
+
+<br><br>
+```{r cars,echo=TRUE,eval=FALSE}
+
+###Grids & TR control
+{
+ELGrid = expand.grid(alpha = seq(0,1,by=0.1),lambda = seq(0,0.1,by = 0.005))
+RFGrid = expand.grid(
+  .mtry=2:10,
+  .splitrule=c("gini","extratrees"),
+  .min.node.size=c(1,3,5)
+)
+XGBGrid <- expand.grid(
+  nrounds = seq(from = 0, to = 1000, by = 200),
+  eta = c(0.05, 0.1, 0.3),
+  max_depth = c(2, 4, 6),
+  gamma = c(0.5,0.7,1.0),
+  colsample_bytree = c(0.4,0.8),
+  min_child_weight = c(1,2,3),
+  subsample = c(0.5,0.75))
+}
+  cctrl1 <- trainControl(method="repeatedcv", number=10,returnResamp = "all", repeats=5, 
+                         classProbs = TRUE, summaryFunction = multiClassSummary, savePredictions = TRUE, verboseIter = TRUE,allowParallel = TRUE)
+  cctrl3 <- trainControl(method="boot", number=1000,returnResamp = "all", 
+                         classProbs = TRUE, summaryFunction = multiClassSummary, savePredictions = TRUE, verboseIter = TRUE)
+  nocctrl <- trainControl(method="none",classProbs = TRUE)
+  p="EarlyRec"
+  fm <- as.formula( paste( p, ".", sep=" ~ ")) 
+  rm(p)
+}
+```
+
+<br><br>
+Each model is then fitted and the hyperparameter combination that yields the highest mean AUC across 5 repeats of 10-fold cross validation is chosen as the optimum hyperparameter. This can then be validated using 1000 bootstrap resamples as below. Note the importance='permutation' argument that is given to the Random Forest model, which is required for variable importance calculations later.
+<br><br>
+```{r cars2,echo=TRUE,eval=FALSE}
+####Elastic Net
+
+registerDoParallel(cores=3)
+system.time(ELRFull<- train(fm, data=dataC, method = "glmnet",preProcess=c('knnImpute'), trControl = cctrl1,
+                            metric = "AUC",na.action=na.pass,tuneGrid = ELGrid))
+system.time(ELRFinal<-train(fm, data=dataC, method = "glmnet",preProcess=c('knnImpute'), trControl = cctrl3,
+                            metric = "AUC",na.action=na.pass,tuneGrid = expand.grid(alpha = ELRFull$bestTune$alpha,lambda = ELRFull$bestTune$lambda)))
+registerDoSEQ()
+
+saveRDS(ELRFull,file="ELRFull4.1.rds")
+saveRDS(ELRFinal,file="ELRFinal4.1.rds")
+
+####Random Forest
+  registerDoParallel(cores=3)
+  
+  system.time(RFFull<-train(fm, data=dataC, method="ranger", num.trees=1000,preProcess=c('knnImpute'),
+                            na.action=na.pass,replace=TRUE, trControl= cctrl1, tuneGrid=RFGrid, metric ="AUC"))
+
+  system.time(RFFinal<-train(fm, data=dataC, method="ranger", num.trees=1000,preProcess=c('knnImpute'),
+                             na.action=na.pass,replace=TRUE,importance='permutation',trControl= cctrl3,
+                             tuneGrid=RFFull$bestTune, metric ="AUC"))
+  registerDoSEQ()
+  saveRDS(RFFull,'RFFull4.1rds')
+  saveRDS(RFFinal,file="RFFinal4.1.rds")
+
+#####XGBoost
+
+  registerDoParallel(cores=3)
+  XGBFull <-train(fm,data=dataC,preProcess=c('knnImpute'),method="xgbTree",trControl=cctrl1,tuneGrid=XGBGrid,
+                  verbose=T,metric="AUC",na.action = na.pass)
+  final_grid<-XGBFull$bestTune
+  
+  XGBFinal<-train(fm,data=dataC,preProcess=c('knnImpute'),method="xgbTree",trControl=cctrl3,tuneGrid=final_grid,
+                  verbose=T,metric="AUC",na.action = na.pass)
+  registerDoSEQ()
+saveRDS(XGBFull,'XGBFull4.1.rds')
+saveRDS(XGBFinal,'XGBFinal4.1.rds')
+
+
+#####Ensemble
+{
+  ensboot<-createResample(dataC$EarlyRec,times=1)
+  enstrain1<-dataC[ensboot[[1]],]
+  enstrain2<-dataC[-ensboot[[1]],]
+  registerDoParallel(cores=3)
+  ELRFull2<- train(EarlyRec~., data=dataC, method = "glmnet",preProcess=c('knnImpute'), trControl = cctrl1,
+                   metric = "AUC",na.action=na.pass,tuneGrid = ELGrid)
+  ELRFinal2<- train(EarlyRec~., data=dataC, method = "glmnet",preProcess=c('knnImpute'), trControl = nocctrl,
+                    metric = "AUC",na.action=na.pass,tuneGrid = ELRFull2$bestTune)
+  qsave(ELRFinal2,'ELRFinal2ens.q')
+  RFFull2<-train(EarlyRec~., data=dataC, method="ranger", num.trees=1000,preProcess=c('knnImpute') ,na.action=na.pass,replace=TRUE,
+                            trControl= cctrl1, tuneGrid=RFGrid, metric ="AUC")
+  RFFinal2<-train(EarlyRec~., data=dataC, method="ranger", num.trees=1000,preProcess=c('knnImpute') ,na.action=na.pass,replace=TRUE,
+                 trControl= nocctrl, tuneGrid=RFFull2$bestTune, metric ="AUC")
+  qsave(RFFinal2,'RFFinal2ens.q')
+  system.time(XGBFull2 <-train(EarlyRec~.,data=dataC,preProcess=c('knnImpute'),method="xgbTree",trControl=cctrl1,tuneGrid=XGBGrid,
+                   verbose=T,metric="AUC",na.action = na.pass))
+  XGBFinal2 <-train(EarlyRec~.,data=dataC,preProcess=c('knnImpute'),method="xgbTree",trControl=nocctrl,tuneGrid=XGBFull2$bestTune,
+                   verbose=T,metric="AUC",na.action = na.pass)
+  qsave(XGBFinal2,'XGBFinal2ens.q')
+  registerDoSEQ()
+  rm(ELRFull2,RFFull2,XGBFull2)
+  RFFinal2<-qread('RFFinal2ens.q')
+  ELRFinal2<-qread('ELRFinal2ens.q')
+  preds<-as.data.frame(1:nrow(na.omit(enstrain2)))
+  preds$ELR<-predict(ELRFinal2,enstrain2,type='prob')[,'Yes']
+  preds$RF<-predict(RFFinal2,enstrain2,type='prob')[,'Yes']
+  preds$XGB<-predict(XGBFinal2,enstrain2,type='prob')[,'Yes']
+  preds$Obs<-na.omit(enstrain2)$EarlyRec
+  preds<-select(preds,-1)
+  EnsLRM<-train(Obs~., data=preds, method = "glm",preProcess=c('knnImpute'), trControl = nocctrl,
+        metric = "AUC",na.action=na.pass)
+  EnsembleFinal<-list(ELRFinal2,RFFinal2,XGBFinal2,EnsLRM)
+
+  Enspredfct=function(model,x){
+    preds<-as.data.frame(predict(model[[4]][[1]],x,type='prob')[,'Yes'])
+    colnames(preds)<-'ELR'
+    preds$RF<-predict(model[[4]][[2]],x,type='prob')[,'Yes']
+    preds$XGB<-predict(model[[4]][[3]],x,type='prob')[,'Yes']
+    preds$LRM<-predict(model[[4]][[4]],preds,type='prob')[,'Yes']
+    preds$LRM
+  }
+}
+```
+
+
+<br><br>
+The ensemble model needs to be trained slightly differently, because of the need for the linear blending of probabilities. The dataset is first split into in-bootstrap and out-bootstrap samples, then the base models are trained as above on the in-bootstrap samples. These models are then used to predict on the out-boostrap samples, which are then combined together as a linear blend using logistic regression. The predict function defined below ('Enspredfct') is then used to generate predictions from the 'Ensemblefinal' object.
+<br><br>
+```{r cars3,echo=TRUE,eval=FALSE}
+#####Ensemble
+{
+  ensboot<-createResample(dataC$EarlyRec,times=1)
+  enstrain1<-dataC[ensboot[[1]],]
+  enstrain2<-dataC[-ensboot[[1]],]
+  registerDoParallel(cores=3)
+  ELRFull2<- train(EarlyRec~., data=dataC, method = "glmnet",preProcess=c('knnImpute'), trControl = cctrl1,
+                   metric = "AUC",na.action=na.pass,tuneGrid = ELGrid)
+  ELRFinal2<- train(EarlyRec~., data=dataC, method = "glmnet",preProcess=c('knnImpute'), trControl = nocctrl,
+                    metric = "AUC",na.action=na.pass,tuneGrid = ELRFull2$bestTune)
+  qsave(ELRFinal2,'ELRFinal2ens.q')
+  RFFull2<-train(EarlyRec~., data=dataC, method="ranger", num.trees=1000,preProcess=c('knnImpute') ,na.action=na.pass,replace=TRUE,
+                            trControl= cctrl1, tuneGrid=RFGrid, metric ="AUC")
+  RFFinal2<-train(EarlyRec~., data=dataC, method="ranger", num.trees=1000,preProcess=c('knnImpute') ,na.action=na.pass,replace=TRUE,
+                 trControl= nocctrl, tuneGrid=RFFull2$bestTune, metric ="AUC")
+  qsave(RFFinal2,'RFFinal2ens.q')
+  system.time(XGBFull2 <-train(EarlyRec~.,data=dataC,preProcess=c('knnImpute'),method="xgbTree",trControl=cctrl1,tuneGrid=XGBGrid,
+                   verbose=T,metric="AUC",na.action = na.pass))
+  XGBFinal2 <-train(EarlyRec~.,data=dataC,preProcess=c('knnImpute'),method="xgbTree",trControl=nocctrl,tuneGrid=XGBFull2$bestTune,
+                   verbose=T,metric="AUC",na.action = na.pass)
+  qsave(XGBFinal2,'XGBFinal2ens.q')
+  registerDoSEQ()
+  rm(ELRFull2,RFFull2,XGBFull2)
+  RFFinal2<-qread('RFFinal2ens.q')
+  ELRFinal2<-qread('ELRFinal2ens.q')
+  preds<-as.data.frame(1:nrow(na.omit(enstrain2)))
+  preds$ELR<-predict(ELRFinal2,enstrain2,type='prob')[,'Yes']
+  preds$RF<-predict(RFFinal2,enstrain2,type='prob')[,'Yes']
+  preds$XGB<-predict(XGBFinal2,enstrain2,type='prob')[,'Yes']
+  preds$Obs<-na.omit(enstrain2)$EarlyRec
+  preds<-select(preds,-1)
+  EnsLRM<-train(Obs~., data=preds, method = "glm",preProcess=c('knnImpute'), trControl = nocctrl,
+        metric = "AUC",na.action=na.pass)
+  EnsembleFinal<-list(ELRFinal2,RFFinal2,XGBFinal2,EnsLRM)
+
+  Enspredfct=function(model,x){
+    preds<-as.data.frame(predict(model[[4]][[1]],x,type='prob')[,'Yes'])
+    colnames(preds)<-'ELR'
+    preds$RF<-predict(model[[4]][[2]],x,type='prob')[,'Yes']
+    preds$XGB<-predict(model[[4]][[3]],x,type='prob')[,'Yes']
+    preds$LRM<-predict(model[[4]][[4]],preds,type='prob')[,'Yes']
+    preds$LRM
+  }
+}
+```
+
+
+# Internal validation by the double bootstrap
+
+Similar to the above, the data is first split into in/out of bootstrap samples (the outer bootstrap,500 times). Each model is then trained on the outerbootstrap training samples, and hyperparameters optimised by an inner bootstrap (1000 times). The same inner and outer bootstrap cases are used for each modelling strategy to ensure they can be combined and compared easily. The inner bootstrap resamples are then extracted and isotonic and logistic regression (for the ensemble) models are generated using the inner bootstrap testing resamples.
+
+The base models and the isotonic and logistic regression models can then be applied to the outer bootstrap testing data to obtain performance metrics. For each outer bootstrap resample, the 1000 inner bootstrap resample outputs are averaged, and then averaged across all the outer boostrap resamples for the final metrics and plots.
+<br><br>
+```{r cars4,echo=TRUE,eval=FALSE}
+
+###Outerbootstrap
+  part<-createResample(dataC$EarlyRec,times=500)
+  outerbootdata<-1
+  ####Innerbootstrap
+ system.time(for (p in 1:500){
+  trainpart<-dataC[part[[p]],]
+  testpart<-dataC[-part[[p]],]
+  boot<-createResample(trainpart$EarlyRec,times=1000)
+  cctrl3x <- trainControl(index=boot,method="boot", number=1000,returnResamp = "all", 
+                          classProbs = TRUE, summaryFunction = multiClassSummary, savePredictions = TRUE, verboseIter = TRUE)
+
+####Train models
+  registerDoParallel(cores=3)
+ELR<-train(EarlyRec~., data=trainpart,preProcess=c('knnImpute'),method = "glmnet", trControl = cctrl3x,
+           metric = "AUC",na.action=na.pass,tuneGrid = Finalmodels[[1]]$bestTune)
+RF<-train(EarlyRec~., data=trainpart,preProcess=c('knnImpute'), method="ranger", num.trees=1000, 
+          na.action=na.pass,replace=TRUE,importance='none',trControl= cctrl3x, 
+          tuneGrid=Finalmodels[[2]]$bestTune, metric ="AUC")
+XGB<-train(EarlyRec~.,data=trainpart,preProcess=c('knnImpute'),method="xgbTree",
+           trControl=cctrl3x,tuneGrid=Finalmodels[[3]]$bestTune,verbose=T,metric="AUC",na.action = na.pass)
+    registerDoSEQ()
+
+    cabs<-1
+    system.time(for (z in 1:length(levels(as.factor(ELR$pred$Resample)))){
+      ELR$pred$Resample<-as.factor(ELR$pred$Resample)
+      RF$pred$Resample<-as.factor(RF$pred$Resample)
+      XGB$pred$Resample<-as.factor(XGB$pred$Resample)
+    x1<-ELR$pred[ELR$pred$Resample==levels(ELR$pred$Resample)[z],]
+    x2<-RF$pred[RF$pred$Resample==levels(RF$pred$Resample)[z],]
+    x3<-XGB$pred[XGB$pred$Resample==levels(XGB$pred$Resample)[z],]
+    preds<-as.data.frame(cbind(x1$Yes,x2$Yes,x3$Yes,as.numeric(x1$obs)-1))
+    colnames(preds)<-c('ELR','RF','XGB','obs')
+    elrcal<-CORElearn::calibrate(as.factor(preds$obs),preds$ELR,class1=2,method='isoReg',assumeProbabilities = TRUE)
+    rfcal<-CORElearn::calibrate(as.factor(preds$obs),preds$RF,class1=2,method='isoReg',assumeProbabilities = TRUE)
+    xgbcal<-CORElearn::calibrate(as.factor(preds$obs),preds$XGB,class1=2,method='isoReg',assumeProbabilities = TRUE)
+    preds$ELRc<-applyCalibration(preds$ELR,elrcal)
+    preds$RFc<-applyCalibration(preds$RF,rfcal)
+    preds$XGBc<-applyCalibration(preds$XGB,xgbcal)
+    lrm<-lrm(obs~ELR+RF+XGB,data=preds)
+    lrmc<-lrm(obs~ELRc+RFc+XGBc,data=preds)
+    preds$LRM<-predict(lrm,preds,type='fitted')
+    lrmc2<-lrm(obs~LRM,data=preds)
+    preds$LRMc<-predict(lrmc,preds,type='fitted')
+    cabs[z]<-list(list(elrcal,rfcal,xgbcal,lrm,lrmc,lrmc2))
+})####30s
+    
+  predictions<-1  
+  system.time(  for (z in 1:length(levels(as.factor(ELR$pred$Resample)))){
+      elrcal<-cabs[[z]][[1]]
+      rfcal<-cabs[[z]][[2]]
+      xgbcal<-cabs[[z]][[3]]
+      lrm<-cabs[[z]][[4]]
+      lrmc<-cabs[[z]][[5]]
+      lrmc2<-cabs[[z]][[6]]
+      
+preds2<-as.data.frame(predict(ELR,testpart,type='prob')[,'Yes'])
+colnames(preds2)<-'ELR'
+preds2$RF<-predict(RF,testpart,type='prob')[,'Yes']
+preds2$XGB<-predict(XGB,testpart,type='prob')[,'Yes']
+preds2$LRM<-predict(lrm,preds2,type='fitted')
+preds2$ELRc<-applyCalibration(preds2$ELR,elrcal)
+preds2$RFc<-applyCalibration(preds2$RF,rfcal)
+preds2$XGBc<-applyCalibration(preds2$XGB,xgbcal)
+preds2$LRMc<-predict(lrmc,preds2,type='fitted')
+preds2$LRMc2<-predict(lrmc2,preds2,type='fitted')
+preds2$obs<-as.numeric(na.omit(testpart)$EarlyRec)-1
+predictions[z]<-list(preds2)
+})#####64s
+ 
+ system.time({ 
+   avefoldLL<-1
+  avefoldBR<-1
+  avefoldCID<-1
+  calplot1<-1
+  ROCplot1<-1
+ cabdata2<-1
+ rocdata2<-1
+ for (i in 1:4){
+   cabdata<-1
+   brs<-1
+   LLs<-1
+   cids<-1
+   lgt<-1
+   roc<-1
+   for (z in 1:1){
+     df<-as.data.frame(cbind(predictions[[z]][,i],predictions[[z]][,10]))
+     colnames(df)<-c('Preds','Obs')
+     brs[z]<-BrierScore(df$Obs,df$Preds)
+     LLs[z]<-logLoss(df$Obs,df$Preds)
+     cids[z]<-auc(df$Obs,df$Preds)
+     lgt[z]<-nrow(df)
+     
+     xx<-ggplot_build(ggplot(data = df) + xlab("Predicted Probability") + ylab('Observed Average')+
+                        geom_smooth(data = df, aes(Preds, Obs),
+                                    color = "#F8766D",se=TRUE,level=0.95,span=2/3)+xlim(c(0,1))+ylim(c(0,1))+
+                        geom_abline(intercept = 0, slope = 1,linetype=2))
+     for (m in 1:(length(xx$data[[1]]$y)-1)){
+       xx$data[[1]]$y[m+1]<-ifelse(xx$data[[1]]$y[m]>0.9&is.na(xx$data[[1]]$y[m+1]),1.0,
+                                   ifelse(xx$data[[1]]$y[m]<0.1&is.na(xx$data[[1]]$y[m+1]),0,xx$data[[1]]$y[m+1]))
+       
+     }
+     cabdata[z]<-list(select(xx$data[[1]],x,y))
+     rocobj<-roc(df$Obs,df$Preds)
+     roc[z]<-list(ggplot_build(ggroc(rocobj,alpha=0.5,colour='red',linetype=6,size=1))$data)
+   }
+   avefoldLL[i]<-list(c(mean(LLs),std.error(LLs)))
+   avefoldBR[i]<-list(c(mean(brs),std.error(brs)))
+   avefoldCID[i]<-list(c(mean(cids),std.error(cids)))
+   
+   lgt2<-1
+   for (n in 1:length(roc)){
+     lgt2[n]<-length(roc[[n]][[1]]$x)
+   }
+   xR<-as.data.frame(roc[[1]][[1]]$x[(1:min(lgt2))])
+   yR<-as.data.frame(roc[[1]][[1]]$y[(1:min(lgt2))])
+   for (n in 1:length(roc)){
+     seqs<-ceiling(seq(from=1,to=length(roc[[n]][[1]]$x),length.out=min(lgt2)))
+     xR[,n]<-roc[[n]][[1]]$x[seqs]
+     yR[,n]<-roc[[n]][[1]]$y[seqs]
+   }
+   rocdat<-as.data.frame(cbind(-rowMeans(xR),
+                               rowMeans(yR),
+                               rowMeans(yR)+1.96*std.error(t(yR)),
+                               rowMeans(yR)-1.96*std.error(t(yR))))
+   
+   colnames(rocdat)<-c('x','y','ymax','ymin')
+   ROCplot1[i]<-list(ggplot(data = rocdat) + xlab("Specificity") + ylab('Sensitivity')+
+                         geom_line(data = rocdat, aes(y=y, x=x),
+                                   color = "#F8766D")+xlim(c(1,0))+ylim(c(0,1))+
+                         geom_abline(intercept = 1, slope = 1,linetype=2)+
+                         geom_ribbon(data=rocdat,aes(x=x,ymin=ymin,ymax=ymax), fill="grey", alpha=0.25))
+   
+   yy<-ggplot_build(ggplot(data = rocdat) + xlab("Specificity") + ylab('Sensitivity')+
+                      geom_line(data = rocdat, aes(y=y, x=x),
+                                color = "#F8766D")+xlim(c(1,0))+ylim(c(0,1))+
+                      geom_abline(intercept = 1, slope = 1,linetype=2)+
+                      geom_ribbon(data=rocdat,aes(x=x,ymin=ymin,ymax=ymax), fill="grey", alpha=0.25))
+   
+   rocdata2[i]<-list(as.data.frame(c(select(yy$data[[1]],x,y),select(yy$data[[3]],ymax,ymin))))
+   xC<-as.data.frame(cabdata[[1]]$x)
+   yC<-as.data.frame(cabdata[[1]]$y)
+   for (n in 1:length(cabdata)){
+     xC[,n]<-cabdata[[n]]$x
+     yC[,n]<-cabdata[[n]]$y
+   }
+   yC[is.na(yC)]<-0
+   cal_plot_data2<-cabdata[[1]]
+   cal_plot_data2$x<-rowMeans(xC)
+   cal_plot_data2$y<-rowMeans(yC)
+   cal_plot_data2$ymin<-rowMeans(yC)-1.96*std.error(t(yC))
+   cal_plot_data2$ymax<-rowMeans(yC)+1.96*std.error(t(yC))
+   calplot1[i]<-list(ggplot(data = cal_plot_data2) + xlab("Predicted Probability") + ylab('Observed Average')+
+                         geom_smooth(data = cal_plot_data2, aes(x, y),
+                                     color = "#F8766D",se=FALSE,level=0.95,span=2/3)+xlim(c(0,1))+ylim(c(0,1))+
+                         geom_abline(intercept = 0, slope = 1,linetype=2)+
+                         geom_ribbon(data=cal_plot_data2,aes(x=x,ymin=ymin,ymax=ymax), fill="grey", alpha=0.25))
+   yy<-ggplot_build(ggplot(data = cal_plot_data2) + xlab("Predicted Probability") + ylab('Observed Average')+
+                      geom_smooth(data = cal_plot_data2, aes(x, y),
+                                  color = "#F8766D",se=FALSE,level=0.95,span=2/3)+xlim(c(0,1))+ylim(c(0,1))+
+                      geom_abline(intercept = 0, slope = 1,linetype=2)+
+                      geom_ribbon(data=cal_plot_data2,aes(x=x,ymin=ymin,ymax=ymax), fill="grey", alpha=0.25))
+   cabdata2[i]<-list(as.data.frame(c(select(yy$data[[1]],x,y),select(yy$data[[3]],ymax,ymin))))
+ }
+  for (i in 5:9){
+    cabdata<-1
+    brs<-1
+    LLs<-1
+    cids<-1
+    lgt<-1
+    roc<-1
+    for (z in 1:length(predictions)){
+      df<-as.data.frame(cbind(predictions[[z]][,i],predictions[[z]][,10]))
+      colnames(df)<-c('Preds','Obs')
+      brs[z]<-BrierScore(df$Obs,df$Preds)
+      LLs[z]<-logLoss(df$Obs,df$Preds)
+      cids[z]<-auc(df$Obs,df$Preds)
+      lgt[z]<-nrow(df)
+      
+      xx<-ggplot_build(ggplot(data = df) + xlab("Predicted Probability") + ylab('Observed Average')+
+                         geom_smooth(data = df, aes(Preds, Obs),
+                                     color = "#F8766D",se=TRUE,level=0.95,span=2/3)+xlim(c(0,1))+ylim(c(0,1))+
+                         geom_abline(intercept = 0, slope = 1,linetype=2))
+      if(nrow(xx$data[[1]])>0){
+      for (m in 1:(length(xx$data[[1]]$y)-1)){
+        xx$data[[1]]$y[m+1]<-ifelse(xx$data[[1]]$y[m]>0.9&is.na(xx$data[[1]]$y[m+1]),1.0,
+                                    ifelse(xx$data[[1]]$y[m]<0.1&is.na(xx$data[[1]]$y[m+1]),0,xx$data[[1]]$y[m+1]))
+        
+      }
+      }else
+      {
+        xx<-ggplot_build(ggplot(data = df) + xlab("Predicted Probability") + ylab('Observed Average')+
+                           geom_smooth(data = df, aes(Preds, Obs),
+                                       color = "#F8766D",se=TRUE,level=0.95,span=1)+xlim(c(0,1))+ylim(c(0,1))+
+                           geom_abline(intercept = 0, slope = 1,linetype=2))
+      for (m in 1:(length(xx$data[[1]]$y)-1)){
+        xx$data[[1]]$y[m+1]<-ifelse(xx$data[[1]]$y[m]>0.9&is.na(xx$data[[1]]$y[m+1]),1.0,
+                                    ifelse(xx$data[[1]]$y[m]<0.1&is.na(xx$data[[1]]$y[m+1]),0,xx$data[[1]]$y[m+1]))
+        
+      }
+      }
+      cabdata[z]<-list(select(xx$data[[1]],x,y))
+      rocobj<-roc(df$Obs,df$Preds)
+      roc[z]<-list(ggplot_build(ggroc(rocobj,alpha=0.5,colour='red',linetype=6,size=1))$data)
+    }
+    avefoldLL[i]<-list(c(mean(LLs),std.error(LLs)))
+    avefoldBR[i]<-list(c(mean(brs),std.error(brs)))
+    avefoldCID[i]<-list(c(mean(cids),std.error(cids)))
+    lgt2<-1
+    for (n in 1:length(roc)){
+      lgt2[n]<-length(roc[[n]][[1]]$x)
+    }
+    xR<-as.data.frame(roc[[1]][[1]]$x[(1:min(lgt2))])
+    yR<-as.data.frame(roc[[1]][[1]]$y[(1:min(lgt2))])
+    for (n in 1:length(roc)){
+      seqs<-ceiling(seq(from=1,to=length(roc[[n]][[1]]$x),length.out=min(lgt2)))
+      xR[,n]<-roc[[n]][[1]]$x[seqs]
+      yR[,n]<-roc[[n]][[1]]$y[seqs]
+    }
+    rocdat<-as.data.frame(cbind(-rowMeans(xR),
+                                rowMeans(yR),
+                                rowMeans(yR)+1.96*std.error(t(yR)),
+                                rowMeans(yR)-1.96*std.error(t(yR))))
+    
+    colnames(rocdat)<-c('x','y','ymax','ymin')
+    ROCplot1[i]<-list(ggplot(data = rocdat) + xlab("Specificity") + ylab('Sensitivity')+
+                          geom_line(data = rocdat, aes(y=y, x=x),
+                                    color = "#F8766D")+xlim(c(1,0))+ylim(c(0,1))+
+                          geom_abline(intercept = 1, slope = 1,linetype=2)+
+                          geom_ribbon(data=rocdat,aes(x=x,ymin=ymin,ymax=ymax), fill="grey", alpha=0.25))
+    
+    yy<-ggplot_build(ggplot(data = rocdat) + xlab("Specificity") + ylab('Sensitivity')+
+                        geom_line(data = rocdat, aes(y=y, x=x),
+                                  color = "#F8766D")+xlim(c(1,0))+ylim(c(0,1))+
+                        geom_abline(intercept = 1, slope = 1,linetype=2)+
+                        geom_ribbon(data=rocdat,aes(x=x,ymin=ymin,ymax=ymax), fill="grey", alpha=0.25))
+    rocdata2[i]<-list(as.data.frame(c(select(yy$data[[1]],x,y),select(yy$data[[3]],ymax,ymin))))
+    avefoldLL  
+    avefoldBR
+    xC<-as.data.frame(cabdata[[1]]$x)
+      yC<-as.data.frame(cabdata[[1]]$y)
+      for (n in 1:length(cabdata)){
+        xC[,n]<-cabdata[[n]]$x
+        yC[,n]<-cabdata[[n]]$y
+      }
+      yC[is.na(yC)]<-0
+      cal_plot_data2<-cabdata[[1]]
+      cal_plot_data2$x<-rowMeans(xC)
+      cal_plot_data2$y<-rowMeans(yC)
+      cal_plot_data2$ymin<-rowMeans(yC)-1.96*std.error(t(yC))
+      cal_plot_data2$ymax<-rowMeans(yC)+1.96*std.error(t(yC))
+      calplot1[i]<-list(ggplot(data = cal_plot_data2) + xlab("Predicted Probability") + ylab('Observed Average')+
+        geom_smooth(data = cal_plot_data2, aes(x, y),
+                    color = "#F8766D",se=FALSE,level=0.95,span=2/3)+xlim(c(0,1))+ylim(c(0,1))+
+        geom_abline(intercept = 0, slope = 1,linetype=2)+
+        geom_ribbon(data=cal_plot_data2,aes(x=x,ymin=ymin,ymax=ymax), fill="grey", alpha=0.25))
+      yy<-ggplot_build(ggplot(data = cal_plot_data2) + xlab("Predicted Probability") + ylab('Observed Average')+
+        geom_smooth(data = cal_plot_data2, aes(x, y),
+                    color = "#F8766D",se=FALSE,level=0.95,span=2/3)+xlim(c(0,1))+ylim(c(0,1))+
+        geom_abline(intercept = 0, slope = 1,linetype=2)+
+        geom_ribbon(data=cal_plot_data2,aes(x=x,ymin=ymin,ymax=ymax), fill="grey", alpha=0.25))
+      cabdata2[i]<-list(as.data.frame(c(select(yy$data[[1]],x,y),select(yy$data[[3]],ymax,ymin))))
+  }
+
+ names(avefoldLL)<-colnames(predictions[[1]])[1:9]
+ names(avefoldBR)<-colnames(predictions[[1]])[1:9]
+ names(avefoldCID)<-colnames(predictions[[1]])[1:9]
+ names(calplot1)<-colnames(predictions[[1]])[1:9]
+ names(ROCplot1)<-colnames(predictions[[1]])[1:9]
+ names(cabdata2)<-colnames(predictions[[1]])[1:9]
+ names(rocdata2)<-colnames(predictions[[1]])[1:9]
+  })
+outerbootdata[p]<-list(list(avefoldLL,avefoldBR,avefoldCID,calplot1,ROCplot1,cabdata2,rocdata2))
+ names(outerbootdata[[p]])<-c('LogLoss','Brier','C-index','Calibration Plots','ROC Plots','Calibration Data','ROC Data')
+ qsave(outerbootdata,'outerbootdata.q')
+
+}  
+
+```
+<br><br>
+
+# Variable Importance Partial Dependence
+
+The partial dependence function is derived below with two example variables (age and gender). The prediction function for the enemble model is defined as earlier (i.e. 'Enspredfct' ). Raw values can be extracted from the 'ft' object if required.
+
+
+```{r cars5,echo=TRUE,message=FALSE,warning=FALSE}
+dataNA<-na.omit(dataC)
+
+expELR<-explain(Finalmodels[[1]],data=dataNA,y=as.numeric(dataNA$EarlyRec)-1,label='ELR')
+expRF<-explain(Finalmodels[[2]],data=dataNA,y=as.numeric(dataNA$EarlyRec)-1,label='RF')
+expXGB<-explain(Finalmodels[[3]],data=dataNA,y=as.numeric(dataNA$EarlyRec)-1,label='XGBoost')
+expENS<-explain(Finalmodels,data=dataNA,y=as.numeric(dataNA$EarlyRec)-1,label='Ensemble',predict_function=Finalmodels[[5]])
+
+x<-(ingredients::partial_dependency(expXGB,'Age'))
+x1<-(ingredients::partial_dependency(expRF,'Age'))
+x2<-(ingredients::partial_dependency(expELR,'Age'))
+x3<-(ingredients::partial_dependency(expENS,'Age'))
+fintab<-rbind(x,x1,x2,x3)
+ft<-rbind(x,x1,x2,x3)
+colnames(fintab)<-c('Variable.Name','Model','x','y','ids')
+agepdp<-ggplotly(ggplot(fintab,aes(x,y))+
+                   geom_line(data=fintab,mapping=aes(colour=Model))+theme_bw()+
+                   ylim(0,0.6)+
+                   ylab('Predicted Probability')+
+                   xlab('Age (years)')+ggtitle('Age at diagnosis'))
+agepdp
+
+x<-(ingredients::partial_dependency(expXGB,'Gender'))
+x1<-(ingredients::partial_dependency(expRF,'Gender'))
+x2<-(ingredients::partial_dependency(expELR,'Gender'))
+x3<-(ingredients::partial_dependency(expENS,'Gender'))
+fintab<-rbind(x,x1,x2,x3)
+ft<-rbind(ft,fintab)
+colnames(fintab)<-c('Variable.Name','Model','x','y','ids')
+colnames(fintab)[3]<-'Gender'
+Genderpdp<-ggplot(fintab,aes(x=Gender,y=y,fill=Gender))+
+  geom_bar(position='dodge',stat='identity')+theme_bw()+
+  ylab('Marginal Predicted Probability')+
+  xlab('')+
+  facet_wrap(~Model)+ggtitle('Gender')
+Genderpdp
+
+```
